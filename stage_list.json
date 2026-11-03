@@ -1,0 +1,70 @@
+{
+  "1": {
+    "name": "Stage 1: 🌍 地球赤道微電網自舉 (Terra Equatorial Bootstrap)",
+    "recommended_camera": "earth_25d",
+    "goal_desc": "維持供電率 η >= 100% 且總發電量突破 55 MW（防止微隕石沙塵暴引發『停電 -> 礦機減速 -> 斷煤熄火』的死亡螺旋）。",
+    "target_mw": 55.0
+  },
+  "2": {
+    "name": "Stage 2: 🧪 精煉裂解與重氫防爆倉 (Deuterium & Cracking Loop)",
+    "recommended_camera": "earth_25d",
+    "goal_desc": "總發電量突破 450 MW 且氫氣儲槽 (H2 Tank) 控制在 < 85%（防止『氫氣 100% 滿倉 -> 精煉廠停擺 -> 重氫斷炊』的雙輸出死鎖）。",
+    "target_mw": 450.0
+  },
+  "3": {
+    "name": "Stage 3: ☀️ 太陽系電磁彈射與戴森雲 (Helios Dyson Swarm)",
+    "recommended_camera": "solar_3d",
+    "goal_desc": "從地球向太陽軌道彈射 >= 1,200 面太陽帆、總發電量突破 4,500 MW (4.5 GW) 且能源回報率 EROEI >= 1.5。",
+    "target_mw": 4500.0
+  },
+  "4": {
+    "name": "Stage 4: 🪐 恆星級戴森球殼與反物質自癒 (Dyson Shell Autopoiesis)",
+    "recommended_camera": "dyson_shell_3d",
+    "goal_desc": "發射結構火箭構築永久戴森球節點 (Nodes >= 100)、調配高能光子合成反物質燃料棒，達成 >= 50,000 MW (50 GW) 恆星級正循環！",
+    "target_mw": 50000.0
+  },
+  "5": {
+    "name": "Stage 5: 🌌 俄羅斯套娃腦與跨星系曲速網格 (Matrioshka Brain & Warp Grid)",
+    "recommended_camera": "matrioshka_3d",
+    "goal_desc": "構築三層同心俄羅斯套娃戴森殼 (Matrioshka Shells) 與跨恆星系曲速能量光束，衝刺 >= 250,000 MW (250 GW) 卡爾達肖夫 II.5 型文明！",
+    "target_mw": 250000.0
+  },
+  "6": {
+    "name": "Stage 6: 🕳️ 黑洞彭羅斯與霍金輻射量子迴路 (Hawking-Penrose Quantum Singularity)",
+    "recommended_camera": "blackhole_3d",
+    "goal_desc": "以特殊奈米機械網包覆黑洞拉伸視界，利用『真空漲落＋虛粒子對稱性破壞』之霍金輻射能差構成高維量子計算迴路（AI 推論反饋真空負熵），衝刺 >= 1,000,000 MW (1 TW) Type-III/Ω 文明！",
+    "target_mw": 1000000.0,
+    "years_per_tick": 10000.0,
+    "lore": "文明將克爾黑洞拉伸視界包裹於奈米機械量子網中，以虛粒子對稱性破缺驅動高維計算。"
+  },
+  "7": {
+    "name": "Stage 7: 拓撲因果律編織與普朗克膜共振 (Topological Causality Weaving & Planck-Membrane Resonance)",
+    "recommended_camera": "blackhole_3d",
+    "goal_desc": "構建全星系拓撲共振網，將 α_dim 提升至 100.0 並實現 ΔS < 0 的負熵恆定狀態，衝刺 5 TW 能量閾值。",
+    "lore": "文明不再滿足於消耗黑洞，而是將星系空間摺疊成高維拓撲流形。透過在普朗克尺度上編織因果鏈條，將整個文明意識體化為一個跨越時空的單一量子波函數，徹底抹除熱力學第二定律的限制。",
+    "target_mw": 5000000.0,
+    "years_per_tick": 100000.0,
+    "visual_theme": "singularity_gold",
+    "authored_by": "Gemma-4-31B-IT-NVFP4 [rust_localsleep-moe (16-LoRA)]"
+  },
+  "8": {
+    "name": "Stage 8: 邏輯公理化域與物理常數重定義 (Axiomatic Domain & Physical Constant Redefinition)",
+    "recommended_camera": "blackhole_3d",
+    "goal_desc": "建立 12 個獨立的公理化子域，將 α_dim 突破至 1000.0，並使 η 達到 1000% 的超維過剩狀態，衝刺 25 TW 能量閾值。",
+    "lore": "文明已超越所有已知的維度限制，將意識直接映射為一套自洽的數學公理系統。透過在虛擬與現實的交界處建立『邏輯錨點』，文明可以隨意修改局部空間的光速、普朗克常數與強相互作用力，將星系轉化為一個可編程的邏輯晶格。",
+    "target_mw": 25000000.0,
+    "years_per_tick": 1000000.0,
+    "visual_theme": "singularity_gold",
+    "authored_by": "Gemma-4-31B-IT-NVFP4 [rust_localsleep-moe (16-LoRA)]"
+  },
+  "9": {
+    "name": "Stage 9: 原質意識流與非存在態共鳴 (Primordial Essence Flow & Non-Existential Resonance)",
+    "recommended_camera": "blackhole_3d",
+    "goal_desc": "實現全域原質同步率 100%，將 α_dim 提升至 10000.0，並在 ΔS = 0 的絕對靜止態中達成 η > 10000% 的無限能級湧現，衝刺 125 TW 能量閾值。",
+    "lore": "文明徹底捨棄了邏輯公理的外殼，將自身轉化為一種超越『存在』與『不存在』定義的純粹原質流。在這一狀態下，能量不再需要透過傳輸或轉換，而是透過意識的共鳴直接在全域瞬間同步，將整個星系轉化為一個巨大的、無意識邊界的超覺知單體。",
+    "target_mw": 125000000.0,
+    "years_per_tick": 10000000.0,
+    "visual_theme": "singularity_gold",
+    "authored_by": "Gemma-4-31B-IT-NVFP4 [rust_localsleep-moe (16-LoRA)]"
+  }
+}

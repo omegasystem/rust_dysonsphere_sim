@@ -1,0 +1,65 @@
+{
+  "active_profile": "local_vllm_or_trtllm",
+  "profiles": {
+    "local_vllm_or_trtllm": {
+      "name": "⚡ Local vLLM / TensorRT-LLM / SGLang (:8000)",
+      "api_base": "http://127.0.0.1:8000/v1",
+      "api_key": "",
+      "model": "auto",
+      "engine_label": "Local-vLLM-or-TRTLLM",
+      "max_tokens": 1536,
+      "temperature": 0.5,
+      "top_p": 0.95,
+      "tcp_host": "127.0.0.1",
+      "tcp_port": 18960
+    },
+    "local_llamacpp": {
+      "name": "🖥️ Local llama.cpp Server (:8001)",
+      "api_base": "http://127.0.0.1:8001/v1",
+      "api_key": "",
+      "model": "auto",
+      "engine_label": "Local-LlamaCpp-Server",
+      "max_tokens": 1536,
+      "temperature": 0.5,
+      "top_p": 0.95,
+      "tcp_host": "127.0.0.1",
+      "tcp_port": 18960
+    },
+    "local_ollama": {
+      "name": "🦙 Local Ollama Server (:11434)",
+      "api_base": "http://127.0.0.1:11434/v1",
+      "api_key": "",
+      "model": "auto",
+      "engine_label": "Local-Ollama",
+      "max_tokens": 1536,
+      "temperature": 0.5,
+      "top_p": 0.95,
+      "tcp_host": "127.0.0.1",
+      "tcp_port": 18960
+    },
+    "openrouter_cloud": {
+      "name": "🌐 OpenRouter / Cloud OpenAI-Compatible API",
+      "api_base": "https://openrouter.ai/api/v1",
+      "api_key": "",
+      "model": "auto",
+      "engine_label": "OpenRouter-Cloud-API",
+      "max_tokens": 1536,
+      "temperature": 0.5,
+      "top_p": 0.95,
+      "tcp_host": "127.0.0.1",
+      "tcp_port": 18960
+    },
+    "custom_openai_compatible": {
+      "name": "🔧 Custom Enterprise / Self-Hosted OpenAI API",
+      "api_base": "http://127.0.0.1:8080/v1",
+      "api_key": "",
+      "model": "auto",
+      "engine_label": "Custom-OpenAI-API",
+      "max_tokens": 1536,
+      "temperature": 0.5,
+      "top_p": 0.95,
+      "tcp_host": "127.0.0.1",
+      "tcp_port": 18960
+    }
+  }
+}

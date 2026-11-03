@@ -1,0 +1,23 @@
+# Rust / Python build & cache artifacts
+.cargo/
+target/
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+.venv/
+venv/
+
+# Private LocalSleep-MoE 16-LoRA bridge (excluded from public main branch; tracked only in private branch)
+dyson_moe_bridge.py
+run_moe_bridge.sh
+
+# Local runtime configs containing API keys or private intranet endpoints
+configs/openai_bridge_profiles.json
+
+# Runtime state, saves, sessions & epoch backups
+saves/
+sessions/
+backups/
+isolated_dyson_sandbox/
+*.log
