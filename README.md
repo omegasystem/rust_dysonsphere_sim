@@ -210,6 +210,7 @@ rust_dysonsphere_sim/
 ├── viewport_3d.py                     # 2.5D/3D 多視角星系渲染器 (地球/太陽系/戴森殼/套娃腦/黑洞視界)
 ├── tcp_lockstep_protocol.py           # JSON-Lines TCP Lockstep 雙向同步通訊協議 (:18960)
 ├── dyson_universal_openai_bridge.py   # 萬用 OpenAI API 相容橋接器 (含 PyQt6 GUI 與 CLI 模式)
+├── dyson_telemetry_db.py              # 零磁碟 I/O 記憶體遙測引擎 (RAM Buffer + Redis/SQLite WAL + Grafana-Lite HTML5 分析儀)
 ├── stage_list.json                    # 初始宇宙演化階段定義 (Stage 1~6；Stage 7~25 由 AI 動態創世寫入)
 ├── configs/
 │   └── openai_bridge_profiles.example.json # 萬用橋接器設定檔範本

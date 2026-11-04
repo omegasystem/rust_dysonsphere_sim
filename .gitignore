@@ -8,9 +8,10 @@ __pycache__/
 .venv/
 venv/
 
-# Private LocalSleep-MoE 16-LoRA bridge (excluded from public main branch; tracked only in private branch)
+# Private LocalSleep-MoE 16-LoRA bridge & ablation research notes (excluded from public main branch; tracked only in private branch)
 dyson_moe_bridge.py
 run_moe_bridge.sh
+docs/
 
 # Local runtime configs containing API keys or private intranet endpoints
 configs/openai_bridge_profiles.json

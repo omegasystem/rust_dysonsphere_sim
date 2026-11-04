@@ -49,6 +49,7 @@ from dyson_sim_engine import (
 )
 from tcp_lockstep_protocol import DEFAULT_TCP_HOST, DEFAULT_TCP_PORT, DysonTcpSyncServer
 from viewport_3d import DysonCosmos3DViewport
+from dyson_telemetry_db import DysonTelemetryDB, backfill_jsonl_sessions_to_db, batch_export_all_legacy_sessions
 
 
 def fmt_num(val: Any, decimals: int = 1) -> str:
@@ -77,9 +78,22 @@ class DysonSphereSimWindow(QMainWindow):
         self.saves_dir = BASE_DIR / "saves"
         self.saves_dir.mkdir(parents=True, exist_ok=True)
         ts_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.session_id = ts_str
         self.session_md_path = self.sess_dir / f"dyson_session_{ts_str}.md"
         self.session_jsonl_path = self.sess_dir / f"dyson_session_{ts_str}.jsonl"
         self._append_session_md(f"# 🪐 Dyson Sphere Dynamic Simulator Session ({ts_str})\n\n")
+
+        # High-Performance RAM-Buffered Telemetry DB (Redis RAM + Pure-RAM Ring Buffer + Batch SQLite WAL)
+        self.telemetry_db_path = self.sess_dir / "dyson_telemetry.db"
+        try:
+            batch_export_all_legacy_sessions(self.sess_dir, self.telemetry_db_path, max_excel_rows=1500)
+        except Exception:
+            pass
+        self.telemetry_db = DysonTelemetryDB(
+            db_path=self.telemetry_db_path,
+            session_id=self.session_id,
+            flush_every_n_ticks=500,  # Zero disk I/O during normal ticks; batch flush only every 500 ticks or on Stage/AI event!
+        )
 
         self.sim_running: bool = True
         self.paused_waiting_ai: bool = False
@@ -194,10 +208,25 @@ class DysonSphereSimWindow(QMainWindow):
         self.chk_compact_mode.setStyleSheet("color: #facc15; font-weight: bold;")
         top_bar.addWidget(self.chk_compact_mode)
 
+        self.chk_mining_econ = QCheckBox("⛏️ 基建&採礦耗材閉環")
+        self.chk_mining_econ.setChecked(True)
+        self.chk_mining_econ.setToolTip("開啟時：蓋基建需消耗原材料（隨 EXP% 級數增加），需調配 mining_rig_build_rate 增產採礦機；關閉時：免耗材直接擴建基建。")
+        self.chk_mining_econ.setStyleSheet("color: #38bdf8; font-weight: bold;")
+        self.chk_mining_econ.toggled.connect(self._on_toggle_mining_economy)
+        top_bar.addWidget(self.chk_mining_econ)
+
         btn_force_sync = QPushButton("⚡ 立即請求 AI 決策 (Pause & Sync)")
         btn_force_sync.setStyleSheet("background-color: #0284c7; color: white;")
         btn_force_sync.clicked.connect(lambda: self._trigger_ai_lockstep_sync(reason="手動觸發同步"))
         top_bar.addWidget(btn_force_sync)
+
+        btn_export_csv = QPushButton("📊 匯出全維度曲線 CSV")
+        btn_export_csv.setToolTip(
+            "平時 65 維度曲線全數駐留於 RAM Ring-Buffer / Redis 記憶體（零磁碟 I/O），點擊可一鍵匯出為 CSV 供畫圖與效益分析！"
+        )
+        btn_export_csv.setStyleSheet("background-color: #0f766e; color: white;")
+        btn_export_csv.clicked.connect(self._on_export_telemetry_csv_clicked)
+        top_bar.addWidget(btn_export_csv)
 
         root_v.addLayout(top_bar)
 
@@ -257,6 +286,7 @@ class DysonSphereSimWindow(QMainWindow):
             ("em_ejector_rate", "🚀 電磁彈射太陽帆率 (0~1.0)", 0.0, 1.0, 0.05),
             ("rocket_launch_rate", "🛰️ 戴森結構火箭發射率 (0~1.0)", 0.0, 1.0, 0.05),
             ("ray_receiver_photon_ratio", "⚡ 接收站高能光子比 (0~1.0)", 0.0, 1.0, 0.05),
+            ("mining_rig_build_rate", "⛏️ 採礦設備增產率 (0~1.5)", 0.0, 1.5, 0.05),
             ("dimensional_exponent", "🌀 多維空間非線性指數 α (0.5~2.5)", 0.5, 2.5, 0.05),
         ]:
             sp = QDoubleSpinBox()
@@ -270,9 +300,11 @@ class DysonSphereSimWindow(QMainWindow):
         self.cmb_build_focus = QComboBox()
         for bf in [
             "balanced",
+            "mining",
+            "fission",
+            "thermal",
             "geothermal",
             "ocean_current",
-            "thermal",
             "refinery",
             "fusion",
             "swarm",
@@ -412,6 +444,15 @@ class DysonSphereSimWindow(QMainWindow):
         if hasattr(self.sim._core, "state") and isinstance(self.sim._core.state, dict):
             self.sim._core.state["auto_advance_stage"] = bool(checked)
 
+    def _on_toggle_mining_economy(self, checked: bool) -> None:
+        if hasattr(self.sim._core, "state") and isinstance(self.sim._core.state, dict):
+            self.sim._core.state["enable_mining_economy"] = bool(checked)
+            if not checked:
+                self.sim._core.state["fault_material_shortage"] = False
+        self.lbl_lockstep_state.setText(
+            f"⛏️ 基建&採礦原材料閉環: {'ON (隨 EXP% 級數耗材)' if checked else 'OFF (已旁路免耗材擴建)'}"
+        )
+
     def _refresh_stage_combobox(self, select_stage: int = 0) -> None:
         cur = select_stage or int(self.cmb_stage.currentData() or 1)
         self.cmb_stage.blockSignals(True)
@@ -456,6 +497,11 @@ class DysonSphereSimWindow(QMainWindow):
         elif st_id <= 3 and not self.chk_compact_mode.isChecked():
             self.chk_compact_mode.setChecked(True)
         self._refresh_ui_from_state(state)
+        if self.chk_auto_ai_sync.isChecked() and self.tcp_server.is_client_connected():
+            self.scheduled_action_queue.clear()
+            self._trigger_ai_lockstep_sync(
+                reason=f"🔄 階段切換/重啟至 Stage {st_id} 初始現狀確認 — 請立即檢視電網與採礦原材料狀態"
+            )
 
     def _on_camera_changed(self) -> None:
         mode = str(self.cmb_camera.currentData() or "auto")
@@ -564,6 +610,17 @@ class DysonSphereSimWindow(QMainWindow):
         )
         (backup_dir / "EPOCH_ARCHIVE_SUMMARY.md").write_text(summary_md, encoding="utf-8")
 
+        # 4b. Flush & Export Full 65-Dimension Time-Series CSV for this completed Epoch!
+        try:
+            epoch_csv_path = backup_dir / f"dyson_telemetry_{self.session_id}.csv"
+            self.telemetry_db.export_session_to_csv(epoch_csv_path)
+            sess_csv_path = self.sess_dir / f"dyson_telemetry_{self.session_id}.csv"
+            self.telemetry_db.export_session_to_csv(sess_csv_path)
+            self.telemetry_db.start_new_session(ts)
+            self.session_id = ts
+        except Exception:
+            pass
+
         # 5. Reset `stage_list.json` to Stages 1~6 & Re-birth Universe at Epoch + 1, Stage 1!
         reset_stage_list_to_base_6()
         if hasattr(self.sim._core, "state") and isinstance(self.sim._core.state, dict):
@@ -595,8 +652,13 @@ class DysonSphereSimWindow(QMainWindow):
             f"\n💥♻️ 【BIG CRUNCH ➔ BIG BANG 宇宙輪迴重啟完成！】\n"
             f"  • 歸檔目錄: backups/{backup_dir.name}/\n"
             f"  • 前世遺物印記: {relic_str}\n"
-            f"  • 新宇宙紀元: 第 {cur_epoch + 1} 輪迴紀元 (Epoch #{cur_epoch + 1}) 已從 Stage 1 地球赤道微電網重新點火！\n"
+            f"  • 新宇宙紀元: 第 {cur_epoch + 1} 輪迴紀元 (Epoch #{cur_epoch + 1}) 已從 Stage 1 (2026 核分裂+火力基建) 重新點火！\n"
         )
+        # Immediately trigger AI inference upon restart to inspect initial status!
+        if self.chk_auto_ai_sync.isChecked() and self.tcp_server.is_client_connected():
+            self._trigger_ai_lockstep_sync(
+                reason=f"♻️ 第 {cur_epoch + 1} 輪迴紀元重啟初始確認 (Tick #1：2026 核分裂+火力基建現狀檢視，滿 100 Ticks 將解鎖地熱與洋流發電！)"
+            )
 
     def _on_preview_ascension_clicked(self) -> None:
         st_cur = int(self.sim.get_state().get("stage", 1))
@@ -695,6 +757,17 @@ class DysonSphereSimWindow(QMainWindow):
                     f"⏰ [Alarm Queue Executed @ Tick #{cur_tick}]: 零算力自動執行預排參數 -> {q_sum}{bonus_str}"
                 )
 
+        # Record 65-dimension telemetry vector into Pure-RAM Buffer (0 disk I/O during regular ticks!)
+        evt_tag = "stage_level_up" if stage_leveled_up else "tick"
+        self.telemetry_db.record_tick(
+            state=state,
+            event_type=evt_tag,
+            model_id=getattr(self, "active_ai_model_id", "Gemma-4-31B-IT-NVFP4"),
+            engine_mode=getattr(self, "active_ai_engine_mode", "rust_localsleep-moe (16-LoRA)"),
+            queue_pending_count=len(self.scheduled_action_queue),
+            force_flush=stage_leveled_up,
+        )
+
         self._refresh_ui_from_state(state)
 
         # Automatic Big Crunch -> Big Bang Cyclic Universe Reset once Stage 25 reaches 100% EXP!
@@ -705,7 +778,13 @@ class DysonSphereSimWindow(QMainWindow):
             return
 
         if self.chk_auto_ai_sync.isChecked() and self.tcp_server.is_client_connected():
-            has_urgent_fault = bool(state.get("fault_brownout_spiral") or state.get("fault_h2_deadlock") or state.get("fault_seu_bitflip"))
+            has_urgent_fault = bool(
+                state.get("fault_brownout_spiral")
+                or state.get("fault_h2_deadlock")
+                or state.get("fault_seu_bitflip")
+                or state.get("fault_material_shortage")
+                or float(state.get("parasitic_drain_mw", 0.0)) > 0.5
+            )
             need_genesis = bool(state.get("awaiting_ai_stage_genesis", False))
             if need_genesis:
                 if self.chk_compact_mode.isChecked():
@@ -805,6 +884,12 @@ class DysonSphereSimWindow(QMainWindow):
                 hello_msg = f"\n🤖 [AI Model Handshake] 自動偵測連線模型: `{m_id}` | 架構模式: `{e_mode}` | Endpoint: `{api_b}`\n"
                 self.txt_ai_log.appendPlainText(hello_msg)
                 self._append_session_md(f"\n> {hello_msg.strip()}\n\n")
+                # If simulator just started / restarted (tick <= 15) and isn't already waiting for AI, trigger immediate initial check!
+                cur_t = int(self.sim.get_state().get("tick", 0))
+                if cur_t <= 15 and self.chk_auto_ai_sync.isChecked() and not self.paused_waiting_ai:
+                    self._trigger_ai_lockstep_sync(
+                        reason="🚀 模擬器啟動 / 橋接器連線初始現狀確認 (檢視 2026 核分裂+火力基建初始狀態)"
+                    )
             elif etype == "client_disconnected":
                 self.lbl_tcp_status.setText("🟡 AI 推論橋接器已斷線，等待重連...")
                 self.paused_waiting_ai = False
@@ -992,7 +1077,18 @@ class DysonSphereSimWindow(QMainWindow):
                     "eroei": new_state.get("eroei"),
                     "raw_ai_reply": raw_text,
                     "parsed_params": parsed_params,
+                    "scheduled_action_queue": list(self.scheduled_action_queue),
+                    "state_snapshot": new_state,
                 })
+                # Record AI Sync Event into RAM buffer & flush batch to Redis/SQLite-WAL now (during AI pause, 0 tick jitter!)
+                self.telemetry_db.record_tick(
+                    state=new_state,
+                    event_type="ai_sync_applied",
+                    model_id=cur_model_id,
+                    engine_mode=cur_engine_mode,
+                    queue_pending_count=len(self.scheduled_action_queue),
+                    force_flush=True,
+                )
                 self.paused_waiting_ai = False
                 if cost_info.get("game_over"):
                     self.sim_running = False
@@ -1039,6 +1135,7 @@ class DysonSphereSimWindow(QMainWindow):
             f"• 🧠 AI 算力耗電端: 上次 Δt={s.get('last_ai_infer_sec', 0.0):.2f}s 扣電 -{fmt_num(s.get('last_ai_consumed_mwh', 0.0), 1)} MWh  |  累計總耗電: {fmt_num(s.get('total_ai_consumed_mwh', 0.0), 1)} MWh\n"
             f"• Tick: #{s['tick']}  |  發電 P_gen: {fmt_num(s['p_gen_mw'], 1)} MW  |  負載 P_req: {fmt_num(s['p_req_mw'], 1)} MW\n"
             f"• 供電滿足率 η: {s['grid_satisfaction']*100:.1f}%  |  🔋 蓄電器: {fmt_num(s['battery_charge_mwh'], 1)}/{fmt_num(s['battery_capacity_mwh'], 1)} MWh\n"
+            f"• ⛏️ 採礦機: {fmt_num(s.get('mining_rigs', 6.0), 1)} 台 | 🧱 原材料庫存: {fmt_num(s.get('raw_material_stock', 180.0), 1)} 噸 (EXP 級數耗材倍率: {s.get('mat_exp_cost_mult', 1.0):.2f}x)\n"
             f"• 燃煤: {fmt_num(s['coal_stock'], 1)} | 氫氣槽(H2): {s['hydrogen_tank_pct']:.1f}% | 精煉油槽: {s['refined_oil_tank_pct']:.1f}% | 重氫: {fmt_num(s['deuterium_stock'], 1)}\n"
             f"• 軌道太陽帆: {fmt_num(s['active_solar_sails'], 0)} 面 | 戴森球節點: {fmt_num(s['dyson_shell_nodes'], 1)} (覆蓋 {fmt_num(s['dyson_shell_coverage_pct'], 1)}%) | EROEI: {fmt_num(s['eroei'], 2)}"
         )
@@ -1054,6 +1151,29 @@ class DysonSphereSimWindow(QMainWindow):
         if "build_focus" in p:
             self.cmb_build_focus.setCurrentText(str(p["build_focus"]))
         self._updating_sliders = False
+
+    def _on_export_telemetry_csv_clicked(self) -> None:
+        import webbrowser
+        out_csv = self.sess_dir / f"dyson_telemetry_{self.session_id}.csv"
+        info = self.telemetry_db.export_session_to_csv(out_csv, max_excel_rows=1500, max_html_rows=4500)
+        hub_info = batch_export_all_legacy_sessions(self.sess_dir, self.telemetry_db_path, max_excel_rows=1500)
+        self.txt_ai_log.appendPlainText(
+            f"\n📊 [Grafana-Lite Telemetry Exported & Legacy Converted ({self.telemetry_db.backend_label})]:\n"
+            f"  • 🟢 當前輪 Excel 高密防當機版 ({info['excel_rows']} 筆): {info['excel_csv_path']}\n"
+            f"  • 📈 當前輪 Grafana-Lite 互動式曲線分析儀 ({info['html_rows']} 點): {info['html_chart_path']}\n"
+            f"  • 🗂️ 已同步升級所有舊紀錄 (共 {hub_info['total_sessions']} 組 Session): {hub_info['hub_html_path']}"
+        )
+        try:
+            webbrowser.open(Path(hub_info["hub_html_path"]).as_uri())
+        except Exception:
+            pass
+
+    def closeEvent(self, event: Any) -> None:
+        try:
+            self.telemetry_db.close()
+        except Exception:
+            pass
+        super().closeEvent(event)
 
 
 def main() -> None:
