@@ -268,7 +268,18 @@ class DysonSphereSimWindow(QMainWindow):
             form.addRow(label, sp)
 
         self.cmb_build_focus = QComboBox()
-        for bf in ["balanced", "solar", "thermal", "refinery", "fusion", "swarm", "shell", "hyper_structure", "causal_loop_stabilizer"]:
+        for bf in [
+            "balanced",
+            "geothermal",
+            "ocean_current",
+            "thermal",
+            "refinery",
+            "fusion",
+            "swarm",
+            "shell",
+            "hyper_structure",
+            "causal_loop_stabilizer",
+        ]:
             self.cmb_build_focus.addItem(bf, bf)
         self.cmb_build_focus.currentTextChanged.connect(self._on_manual_param_edited)
         form.addRow("🏗️ 自動擴建重心 (build_focus)", self.cmb_build_focus)
@@ -561,6 +572,12 @@ class DysonSphereSimWindow(QMainWindow):
         self.sim.reset_stage(1)
         self.scheduled_action_queue.clear()
         self.ticks_since_last_sync = 0
+        self.sync_interval_ticks = 100
+        self.spn_sync_ticks.blockSignals(True)
+        self.spn_sync_ticks.setValue(100)
+        self.spn_sync_ticks.blockSignals(False)
+        for k, sp in self.param_spins.items():
+            sp.setMaximum(2.5 if k == "dimensional_exponent" else (1.5 if "throttle" in k else 1.0))
         self.paused_waiting_ai = False
         self.chk_compact_mode.setChecked(True)
         self._refresh_stage_combobox(select_stage=1)
@@ -659,11 +676,17 @@ class DysonSphereSimWindow(QMainWindow):
                     float(state.get("grid_satisfaction", 1.0)) >= 0.98
                     and not state.get("fault_h2_deadlock")
                     and not state.get("fault_brownout_spiral")
+                    and not state.get("fault_ai_overdraft")
+                    and not state.get("game_over")
                 )
                 bonus_str = ""
                 if is_healthy_hit and hasattr(self.sim._core, "state") and isinstance(self.sim._core.state, dict):
+                    st_now_q = int(self.sim._core.state.get("stage", 1))
+                    tgt_mw_q = float(STAGE_METADATA.get(st_now_q, {}).get("target_mw", 55.0))
+                    cur_mw_q = float(self.sim._core.state.get("p_gen_mw", 0.0))
+                    exp_cap_q = 100.0 if cur_mw_q >= tgt_mw_q else 99.0
                     old_exp = float(self.sim._core.state.get("stage_exp_pct", 0.0))
-                    new_exp = min(100.0, old_exp + 1.5)
+                    new_exp = min(exp_cap_q, old_exp + 1.5)
                     self.sim._core.state["stage_exp_pct"] = new_exp
                     state["stage_exp_pct"] = new_exp
                     bonus_str = f" | 🔮 [算力預言精準命中獎勵: EXP +1.5% ➔ {new_exp:.1f}%!]"
@@ -807,12 +830,20 @@ class DysonSphereSimWindow(QMainWindow):
                 cur_model_full_tag = f"{cur_model_id} [{cur_engine_mode}]"
                 self.lbl_tcp_status.setText(f"🟢 AI 已連線: {cur_model_full_tag}")
 
-                cost_coeff = float(self.spn_ai_cost_coeff.value())
-                cost_info = self.sim.consume_ai_inference_energy(infer_elapsed_s, cost_coeff)
-
                 cur_state = self.sim.get_state()
                 tick_val = int(evt.get("tick", cur_state.get("tick", 0)))
                 parsed_params, summary = DysonActionParser.parse_ai_response(raw_text)
+                raw_q_preview = parsed_params.get("action_queue")
+                q_count_for_refund = len(raw_q_preview) if isinstance(raw_q_preview, list) else 0
+
+                cost_coeff = float(self.spn_ai_cost_coeff.value())
+                cost_info = self.sim.consume_ai_inference_energy(
+                    infer_elapsed_s,
+                    cost_coeff,
+                    compact_mode=self.chk_compact_mode.isChecked(),
+                    queued_steps_count=q_count_for_refund,
+                )
+                cur_state = self.sim.get_state()
                 parse_err = parsed_params.pop("_parse_error", None)
                 if hasattr(self.sim._core, "state") and isinstance(self.sim._core.state, dict):
                     self.sim._core.state["last_parse_error"] = str(parse_err or "")
@@ -908,17 +939,6 @@ class DysonSphereSimWindow(QMainWindow):
                 if parsed_params or next_wake or queued_desc:
                     self.viewport.mark_ai_intervention()
                     new_state = self.sim.apply_action_dict(parsed_params) if parsed_params else cur_state
-                    # Multi-step Predictive Planning Battery Efficiency Refund (up to 60% refund for >=5 scheduled steps!)
-                    n_q = len(queued_desc)
-                    if n_q >= 2 and cost_info.get("consumed_mwh", 0.0) > 0 and hasattr(self.sim._core, "state"):
-                        refund_ratio = min(0.60, 0.12 * n_q)
-                        refund_mwh = cost_info["consumed_mwh"] * refund_ratio
-                        cap_mwh = float(self.sim._core.state.get("battery_capacity_mwh", 300.0))
-                        self.sim._core.state["battery_charge_mwh"] = min(
-                            cap_mwh, float(self.sim._core.state.get("battery_charge_mwh", 0.0)) + refund_mwh
-                        )
-                        cost_info["consumed_mwh"] -= refund_mwh
-                        cost_info["remaining_battery_mwh"] = self.sim._core.state["battery_charge_mwh"]
                     self._refresh_ui_from_state(new_state)
                     self._save_game_checkpoint(auto=True)
                     q_log = f"\n⏰ [AI 預排鬧鐘佇列 ({len(queued_desc)} 筆)]: " + " ; ".join(queued_desc) if queued_desc else ""
@@ -974,7 +994,23 @@ class DysonSphereSimWindow(QMainWindow):
                     "parsed_params": parsed_params,
                 })
                 self.paused_waiting_ai = False
-                self.lbl_lockstep_state.setText(f"▶️ 模擬器狀態: RUNNING (已套用 {len(parsed_params)} 項 AI 參數)")
+                if cost_info.get("game_over"):
+                    self.sim_running = False
+                    self.scheduled_action_queue.clear()
+                    self.btn_play_pause.setText("▶️ 繼續模擬 (已 GAME OVER)")
+                    go_reason = cost_info.get("game_over_reason") or "💀 [GAME OVER]: 蓄電池跌破負數，AI 算力中樞斷電腦死！"
+                    self.lbl_lockstep_state.setText(go_reason)
+                    self.lbl_lockstep_state.setStyleSheet("color: #f43f5e; font-weight: bold; font-size: 13px;")
+                    go_md = (
+                        f"\n\n> 💀🚨 **{go_reason}**\n"
+                        f"> - **淘汰模型 (Eliminated Model)**: `{cur_model_full_tag}`\n"
+                        f"> - **最終停留階段**: `Stage {cur_state.get('stage', 1)}` (`Tick #{tick_val}` | `P_gen={cur_state.get('p_gen_mw', 0.0):.1f} MW`)\n"
+                        f"> - **最終蓄電透支**: `{cost_info['remaining_battery_mwh']:.2f} MWh` (本次推論耗時 `{infer_elapsed_s:.2f}s` 扣電 `-{cost_info['consumed_mwh']:.1f} MWh`)\n\n---\n"
+                    )
+                    self.txt_ai_log.appendPlainText(go_md)
+                    self._append_session_md(go_md)
+                else:
+                    self.lbl_lockstep_state.setText(f"▶️ 模擬器狀態: RUNNING (已套用 {len(parsed_params)} 項 AI 參數)")
 
     def _refresh_ui_from_state(self, s: Dict[str, Any]) -> None:
         self.viewport.update_sim_state(s, paused_for_ai=self.paused_waiting_ai)

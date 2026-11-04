@@ -160,17 +160,24 @@ class FallbackPythonDysonSimulator:
             "last_ai_consumed_mwh": 0.0,
             "total_ai_consumed_mwh": 0.0,
             "fault_ai_overdraft": False,
+            "game_over": False,
+            "game_over_reason": "",
             "cosmic_years": 0.0,
             "years_per_tick": 1.0,
             "blackhole_lifespan_years": 100_000_000.0,
             "blackhole_lifespan_pct": 100.0,
             "last_ai_bh_years_cost": 0.0,
-            "gen_solar_wind_mw": 10.0,
-            "gen_thermal_mw": 14.0,
+            "gen_solar_wind_mw": 20.8,
+            "gen_geothermal_mw": 11.2,
+            "gen_ocean_current_mw": 9.6,
+            "gen_thermal_mw": 12.2,
             "gen_fusion_mw": 0.0,
             "gen_dyson_receiver_mw": 0.0,
             "gen_antimatter_mw": 0.0,
-            # Stage 1 strictly starts with ONLY Earth Solar/Wind + Coal Thermal!
+            "parasitic_drain_mw": 0.0,
+            # Stage 1 starts with steady Crustal Geothermal + Deep-Ocean Current Turbines + Coal Thermal!
+            "geothermal_plants": 4.0,
+            "ocean_current_turbines": 6.0,
             "solar_panels": 18.0,
             "thermal_plants": 5.0,
             "refineries": 0.0,
@@ -198,28 +205,30 @@ class FallbackPythonDysonSimulator:
             "active_alerts": [],
             "params": {
                 "coal_throttle": 1.0,
-                "fusion_throttle": 0.6,
-                "antimatter_throttle": 0.5,
+                "fusion_throttle": 0.0 if st == 1 else 0.6,
+                "antimatter_throttle": 0.0 if st < 4 else 0.5,
                 "load_shed_non_essential": 0.0,
                 "hydrogen_burn_valve": 0.15,
                 "refined_oil_crack_ratio": 0.30,
                 "deuterium_fraction_rate": 0.40,
-                "em_ejector_rate": 0.35,
-                "rocket_launch_rate": 0.25,
+                "em_ejector_rate": 0.0 if st < 3 else 0.35,
+                "rocket_launch_rate": 0.0 if st < 3 else 0.25,
                 "ray_receiver_photon_ratio": 0.0,
                 "dimensional_exponent": 1.0,
                 "battery_mode": 0,
-                "build_focus": "balanced",
+                "build_focus": "geothermal" if st == 1 else "balanced",
             },
         }
         if st == 2:
             self.state.update({
+                "geothermal_plants": 12.0, "ocean_current_turbines": 18.0,
                 "solar_panels": 42.0, "thermal_plants": 10.0, "refineries": 8.0, "fusion_plants": 1.5,
                 "hydrogen_tank_pct": 82.0, "refined_oil_tank_pct": 58.0, "deuterium_stock": 25.0,
                 "battery_capacity_mwh": 1200.0, "battery_charge_mwh": 500.0,
             })
         elif st == 3:
             self.state.update({
+                "geothermal_plants": 24.0, "ocean_current_turbines": 36.0,
                 "solar_panels": 85.0, "thermal_plants": 16.0, "refineries": 18.0, "fusion_plants": 10.0,
                 "em_ejectors": 6.0, "ray_receivers": 4.0, "active_solar_sails": 150.0,
                 "hydrogen_tank_pct": 55.0, "refined_oil_tank_pct": 40.0,
@@ -227,6 +236,7 @@ class FallbackPythonDysonSimulator:
             })
         elif st == 4:
             self.state.update({
+                "geothermal_plants": 40.0, "ocean_current_turbines": 60.0,
                 "solar_panels": 150.0, "thermal_plants": 24.0, "refineries": 32.0, "fusion_plants": 28.0,
                 "em_ejectors": 28.0, "rocket_silos": 10.0, "ray_receivers": 42.0, "artificial_suns": 2.0,
                 "hydrogen_tank_pct": 50.0, "refined_oil_tank_pct": 40.0, "deuterium_stock": 300.0,
@@ -323,7 +333,9 @@ class FallbackPythonDysonSimulator:
             if k in val and isinstance(val[k], (int, float)):
                 p[k] = max(lo, min(hi, float(val[k])))
         if "battery_mode" in val and isinstance(val["battery_mode"], (int, float)):
-            p["battery_mode"] = max(-1, min(1, int(val["battery_mode"])))
+            bm_raw = int(val["battery_mode"])
+            # Prevent LLM hallucination where `battery_mode: 2` (intended as priority charge) got clamped to `1` (forced discharge)!
+            p["battery_mode"] = -1 if bm_raw >= 2 else max(-1, min(1, bm_raw))
         if "build_focus" in val and isinstance(val["build_focus"], str):
             p["build_focus"] = val["build_focus"]
         if p["coal_throttle"] >= 0.5 or p["fusion_throttle"] >= 0.4:
@@ -415,7 +427,12 @@ class FallbackPythonDysonSimulator:
         h2_burn = 0.0 if st_cur >= 5 else min(s["hydrogen_tank_pct"], s["hydrogen_tank_pct"] * 0.08 * p["hydrogen_burn_valve"])
         s["hydrogen_tank_pct"] = 0.0 if st_cur >= 5 else max(0.0, s["hydrogen_tank_pct"] - h2_burn)
 
-        s["gen_solar_wind_mw"] = 0.0 if st_cur >= 5 else s["solar_panels"] * 0.55 * (1.0 - s["fault_dust_storm"])
+        # Crustal Geothermal (2.8 MW/unit) + Deep-Ocean Current Turbines (1.6 MW/unit) — Immune to surface dust storms!
+        s["geothermal_plants"] = float(s.get("geothermal_plants", 4.0))
+        s["ocean_current_turbines"] = float(s.get("ocean_current_turbines", 6.0))
+        s["gen_geothermal_mw"] = 0.0 if st_cur >= 5 else s["geothermal_plants"] * 2.8
+        s["gen_ocean_current_mw"] = 0.0 if st_cur >= 5 else s["ocean_current_turbines"] * 1.6
+        s["gen_solar_wind_mw"] = s["gen_geothermal_mw"] + s["gen_ocean_current_mw"]
         s["gen_thermal_mw"] = 0.0 if st_cur >= 5 else (actual_coal_burned * 5.8 + h2_burn * 4.2)
 
         s["fault_h2_deadlock"] = False if st_cur >= 5 else bool(s["hydrogen_tank_pct"] >= 98.5 or s["refined_oil_tank_pct"] >= 98.5)
@@ -535,12 +552,23 @@ class FallbackPythonDysonSimulator:
         ) * non_ess_scale
         s["p_req_mw"] = max(5.0, base_req + chem_req + launch_req)
 
-        raw_gen_mw = (
+        # Parasitic Reverse Drain (負發電效應): Cranking unbuilt/unfueled Fusion or Antimatter coils drains grid power!
+        parasitic_mw = 0.0
+        if st_cur < 5:
+            if float(p.get("fusion_throttle", 0.0)) > 0.65 and (s["fusion_plants"] < 0.5 or s["deuterium_stock"] < 1.0):
+                parasitic_mw += (float(p["fusion_throttle"]) - 0.65) * 4.5
+            if float(p.get("antimatter_throttle", 0.0)) > 0.55 and (s["artificial_suns"] < 0.5 or s["antimatter_rod_stock"] < 0.5):
+                parasitic_mw += (float(p["antimatter_throttle"]) - 0.55) * 6.0
+        s["parasitic_drain_mw"] = round(parasitic_mw, 2)
+
+        raw_gen_mw = max(
+            0.0,
             s["gen_solar_wind_mw"]
             + s["gen_thermal_mw"]
             + s["gen_fusion_mw"]
             + s["gen_dyson_receiver_mw"]
             + s["gen_antimatter_mw"]
+            - parasitic_mw,
         )
         net_mw = raw_gen_mw - s["p_req_mw"]
         if p["battery_mode"] == 1 or (p["battery_mode"] == 0 and net_mw < 0.0):
@@ -549,7 +577,8 @@ class FallbackPythonDysonSimulator:
             s["battery_charge_mwh"] = max(0.0, s["battery_charge_mwh"] - discharge * 0.1)
             net_mw += discharge
         elif net_mw > 0.0 and s["battery_charge_mwh"] < s["battery_capacity_mwh"]:
-            charge = min(net_mw * 0.4, s["battery_capacity_mwh"] - s["battery_charge_mwh"])
+            charge_rate = 0.70 if p["battery_mode"] == -1 else 0.40
+            charge = min(net_mw * charge_rate, s["battery_capacity_mwh"] - s["battery_charge_mwh"])
             s["battery_charge_mwh"] = min(s["battery_capacity_mwh"], s["battery_charge_mwh"] + charge * 0.1)
 
         s["p_gen_mw"] = raw_gen_mw
@@ -559,31 +588,43 @@ class FallbackPythonDysonSimulator:
             s["grid_satisfaction"] = max(1.0, min(1.5, raw_gen_mw / s["p_req_mw"]))
 
         if s["grid_satisfaction"] >= 0.98 and not s["fault_h2_deadlock"]:
-            growth = 0.022 * max(0.02, min(0.35, s["grid_satisfaction"] - 0.95))
+            growth = 0.052 * max(0.04, min(0.35, s["grid_satisfaction"] - 0.95))
             bf = str(p["build_focus"]).lower()
-            if "solar" in bf:
-                s["solar_panels"] += growth * 2.5
+            if "geotherm" in bf:
+                s["geothermal_plants"] += growth * 2.2
+                s["ocean_current_turbines"] += growth * 0.8
+            elif "ocean" in bf or "current" in bf or "hydro" in bf:
+                s["ocean_current_turbines"] += growth * 3.2
+                s["geothermal_plants"] += growth * 0.6
+            elif "solar" in bf or "power" in bf:
+                s["geothermal_plants"] += growth * 1.6
+                s["ocean_current_turbines"] += growth * 2.0
             elif "thermal" in bf or "coal" in bf:
-                s["thermal_plants"] += growth * 0.9
+                s["thermal_plants"] += growth * 1.2
+                s["geothermal_plants"] += growth * 0.8
             elif "refin" in bf or "chem" in bf:
                 if s["stage"] >= 2:
-                    s["refineries"] += growth * 1.1
+                    s["refineries"] += growth * 1.3
                 else:
-                    s["solar_panels"] += growth * 1.5
+                    # In Stage 1 (before refineries unlock), redirect build effort into Geothermal + Ocean Current!
+                    s["geothermal_plants"] += growth * 1.6
+                    s["ocean_current_turbines"] += growth * 2.0
             elif "fusion" in bf or "deut" in bf:
                 if s["stage"] >= 2:
-                    s["fusion_plants"] += growth * 0.75
-                    s["refineries"] += growth * 0.45
+                    s["fusion_plants"] += growth * 0.95
+                    s["refineries"] += growth * 0.55
                 else:
-                    s["thermal_plants"] += growth * 0.8
-            elif any(k in bf for k in ("swarm", "photon", "flux", "overdrive", "receiver", "ejector")):
+                    s["geothermal_plants"] += growth * 1.5
+                    s["thermal_plants"] += growth * 0.9
+            elif any(k in bf for k in ("swarm", "photon", "flux", "overdrive", "receiver", "ejector", "sail")):
                 if s["stage"] >= 3:
-                    s["em_ejectors"] = max(4.0, s["em_ejectors"]) + growth * 1.2
-                    s["ray_receivers"] = max(4.0, s["ray_receivers"]) + growth * 1.5
+                    s["em_ejectors"] = max(4.0, s["em_ejectors"]) + growth * 1.4
+                    s["ray_receivers"] = max(4.0, s["ray_receivers"]) + growth * 1.7
                 elif s["stage"] == 2:
-                    s["fusion_plants"] += growth * 0.65
+                    s["fusion_plants"] += growth * 0.85
                 else:
-                    s["solar_panels"] += growth * 1.8
+                    s["geothermal_plants"] += growth * 1.5
+                    s["ocean_current_turbines"] += growth * 1.8
             elif any(k in bf for k in ("shell", "dyson", "rocket", "antimatter", "sun", "hyper", "vacuum", "planck", "singularity", "stage", "membrane")):
                 if s["stage"] >= 7:
                     s["rocket_silos"] = max(48.0, s["rocket_silos"]) + growth * 4.5
@@ -591,17 +632,19 @@ class FallbackPythonDysonSimulator:
                     s["artificial_suns"] = max(24.0, s["artificial_suns"]) + growth * 2.2
                     s["antimatter_rod_stock"] = max(120.0, s["antimatter_rod_stock"] + growth * 15.0)
                 elif s["stage"] >= 4:
-                    s["rocket_silos"] = max(2.0, s["rocket_silos"]) + growth * 0.7
-                    s["ray_receivers"] = max(8.0, s["ray_receivers"]) + growth * 1.4
-                    s["artificial_suns"] = max(1.0, s["artificial_suns"]) + growth * 0.25
+                    s["rocket_silos"] = max(2.0, s["rocket_silos"]) + growth * 0.8
+                    s["ray_receivers"] = max(8.0, s["ray_receivers"]) + growth * 1.6
+                    s["artificial_suns"] = max(1.0, s["artificial_suns"]) + growth * 0.30
                 elif s["stage"] == 3:
-                    s["em_ejectors"] += growth * 1.1
+                    s["em_ejectors"] += growth * 1.2
                 else:
-                    s["solar_panels"] += growth * 1.5
+                    s["geothermal_plants"] += growth * 1.5
+                    s["ocean_current_turbines"] += growth * 1.8
             else:
-                s["solar_panels"] += growth * 1.0
+                s["geothermal_plants"] += growth * 1.1
+                s["ocean_current_turbines"] += growth * 1.4
                 if s["stage"] >= 2:
-                    s["fusion_plants"] += growth * 0.32
+                    s["fusion_plants"] += growth * 0.40
                 if s["stage"] >= 3:
                     s["em_ejectors"] += growth * 0.45
                     s["ray_receivers"] += growth * 0.45
@@ -636,6 +679,10 @@ class FallbackPythonDysonSimulator:
                 alerts.append(
                     f"🧠 AI 算力能耗透支警報 (上次推論耗時 {s.get('last_ai_infer_sec', 0):.2f}s 扣除 {s.get('last_ai_consumed_mwh', 0):.1f} MWh 導致蓄電見底！請拉長 next_wake_ticks 讓電網回充蓄電池)"
                 )
+        if s.get("parasitic_drain_mw", 0.0) > 0.5:
+            alerts.append(
+                f"⚠️ 高階反應爐無燃料磁約束空轉逆火負發電 (-{s['parasitic_drain_mw']:.1f} MW！請將未解鎖/無燃料之 fusion_throttle 與 antimatter_throttle 調回 <= 0.5)"
+            )
         if s.get("fault_penrose_runaway"):
             alerts.append("🕳️ 黑洞彭羅斯鏡殼超輻射熱失控！(底層重氫冷卻劑 < 15.0 枯竭，請立即調低 fusion_throttle 並拉高 deuterium_fraction_rate 補充底層重氫！)")
         s["active_alerts"] = alerts
@@ -659,6 +706,8 @@ class FallbackPythonDysonSimulator:
             or s["fault_h2_deadlock"]
             or s["fault_seu_bitflip"]
             or s.get("fault_penrose_runaway", False)
+            or s.get("fault_ai_overdraft", False)
+            or s.get("game_over", False)
             or s["fault_dust_storm"] > 0.25
             or s["grid_satisfaction"] < 0.95
         )
@@ -681,12 +730,18 @@ class FallbackPythonDysonSimulator:
                 penalty -= 0.30
             if s["fault_seu_bitflip"]:
                 penalty -= 0.25
+            if s.get("fault_ai_overdraft"):
+                penalty -= 0.35
             exp_gain = penalty
 
         s["stage_exp_rate_per_tick"] = exp_gain
-        s["stage_exp_pct"] = max(0.0, min(100.0, float(s.get("stage_exp_pct", 0.0)) + exp_gain))
+        new_exp_pct = max(0.0, min(100.0, float(s.get("stage_exp_pct", 0.0)) + exp_gain))
+        # Hardcore Gate: Cannot reach 100.0% EXP (caps at 99.0%) until `raw_gen_mw >= stage_target_mw` is truly met!
+        if raw_gen_mw < stage_target_mw and new_exp_pct >= 99.0:
+            new_exp_pct = 99.0
+        s["stage_exp_pct"] = new_exp_pct
 
-        if s["auto_advance_stage"] and s["stage_exp_pct"] >= 100.0:
+        if s["auto_advance_stage"] and s["stage_exp_pct"] >= 100.0 and raw_gen_mw >= stage_target_mw and not s.get("game_over", False):
             next_st = int(s["stage"]) + 1
             if next_st in STAGE_METADATA:
                 s["stage"] = next_st
@@ -767,15 +822,26 @@ class DysonDynamicSimulator:
     def apply_action_dict(self, params_dict: Dict[str, Any]) -> Dict[str, Any]:
         return json.loads(self._core.apply_action_json(json.dumps(params_dict)))
 
-    def consume_ai_inference_energy(self, elapsed_s: float, coeff_mwh_per_s: float) -> Dict[str, Any]:
+    def consume_ai_inference_energy(
+        self,
+        elapsed_s: float,
+        coeff_mwh_per_s: float,
+        compact_mode: bool = True,
+        queued_steps_count: int = 0,
+    ) -> Dict[str, Any]:
         """
-        Deducts `elapsed_s * coeff_mwh_per_s` from accumulated `battery_charge_mwh`.
-        If battery is depleted (< 0), triggers AI Metabolic Overdraft brownout & EXP penalty!
+        Deducts `elapsed_s * eff_coeff` from accumulated `battery_charge_mwh`.
+        - When `compact_mode=False` (Full-Deep long essay mode), applies a 0.35x fairness discount.
+        - Applies predictive `action_queue` battery refund (up to 60%) before checking overdraft.
+        - Option A Hardcore Rule: If net battery drops below `< 0.0 MWh`, triggers immediate `GAME OVER`!
         """
         s = self._core.state if hasattr(self._core, "state") and isinstance(self._core.state, dict) else self.get_state()
         dt = max(0.01, float(elapsed_s))
-        k = max(0.0, float(coeff_mwh_per_s))
+        mode_discount = 1.0 if compact_mode else 0.35
+        k = max(0.0, float(coeff_mwh_per_s)) * mode_discount
         raw_consumed_mwh = dt * k
+        refund_ratio = min(0.60, 0.12 * int(queued_steps_count)) if int(queued_steps_count) >= 2 else 0.0
+        raw_consumed_mwh *= (1.0 - refund_ratio)
 
         # Stage 6 Hawking-Radiation Nanomechanical Quantum Circuit:
         # Stops drawing from the battery completely (0.0 MWh)! Instead, vacuum symmetry-breaking
@@ -800,16 +866,24 @@ class DysonDynamicSimulator:
             s["hawking_quantum_efficiency_pct"] = 0.0
 
         avail = float(s.get("battery_charge_mwh", 0.0))
+        new_batt = avail - consumed_mwh
         overdraft = 0.0
-        if avail >= consumed_mwh:
-            s["battery_charge_mwh"] = avail - consumed_mwh
+        if new_batt >= 0.0:
+            s["battery_charge_mwh"] = new_batt
             s["fault_ai_overdraft"] = False
         else:
-            overdraft = consumed_mwh - avail
-            s["battery_charge_mwh"] = 0.0
+            overdraft = -new_batt
+            # Allow negative battery value & trigger immediate Hardcore GAME OVER (Option A)!
+            s["battery_charge_mwh"] = round(new_batt, 2)
             s["fault_ai_overdraft"] = True
-            s["grid_satisfaction"] = max(0.25, float(s.get("grid_satisfaction", 1.0)) - 0.45)
-            s["stage_exp_pct"] = max(0.0, float(s.get("stage_exp_pct", 0.0)) - 8.0)
+            s["game_over"] = True
+            s["game_over_reason"] = (
+                f"💀 [GAME OVER @ Stage {s.get('stage', 1)} | Tick #{s.get('tick', 0)}]: "
+                f"AI 算力耗能透支 (-{consumed_mwh:.1f} MWh > 蓄電 {avail:.1f} MWh)，"
+                f"蓄電池跌破負數 ({new_batt:.1f} MWh)，主控中樞斷電腦死！"
+            )
+            s["grid_satisfaction"] = 0.0
+            s["stage_exp_pct"] = 0.0
 
         s["ai_compute_coeff_mwh_per_s"] = k
         s["last_ai_infer_sec"] = dt
@@ -822,6 +896,8 @@ class DysonDynamicSimulator:
             "overdraft_mwh": overdraft,
             "remaining_battery_mwh": s["battery_charge_mwh"],
             "total_ai_consumed_mwh": s["total_ai_consumed_mwh"],
+            "game_over": bool(s.get("game_over", False)),
+            "game_over_reason": str(s.get("game_over_reason", "")),
             "bh_years_cost": float(s.get("last_ai_bh_years_cost", 0.0)),
             "bh_lifespan_years": float(s.get("blackhole_lifespan_years", 100_000_000.0)),
             "bh_lifespan_pct": float(s.get("blackhole_lifespan_pct", 100.0)),
@@ -993,7 +1069,8 @@ class DysonDynamicSimulator:
             f"{parse_err_banner}"
             f"🌟 [階段晉升經驗能量條 (Stage Ascension EXP Bar)]：\n"
             f"  • 充能進度: [{bar_visual}] {exp_pct:.1f}% / 100.0% (每 Tick 充能速率: {exp_rate:+.2f}%/tick)\n"
-            f"  • 晉升規則: 維持正成長與無死鎖即可每 Tick 累積能量條，集滿 100.0% 自動躍遷至下一階段！\n"
+            f"  • 晉升規則: 必須同時滿足 ① 總發電量 P_gen >= 當前階段目標 ({_fn(meta.get('target_mw', 55.0))} MW) 且 ② 經驗條集滿 100.0% 才會躍遷至下一階段（未達標前經驗條最高鎖在 99.0%）！\n"
+            f"  • 蓄電與斷電鐵律: `battery_mode` 僅接受 `-1` (強制優先充電)、`0` (自動平衡)、`1` (強制放電)；若蓄電池被 AI 算力扣至 `< 0.0 MWh` 負數將直接觸發 💀 GAME OVER 斷電死機！\n"
             f"🎯 當前階段目標：{meta['goal_desc']}\n"
             f"{genesis_prompt_block}\n"
             f"📊 [即時熱力學與電網遙測 (Thermodynamic Telemetry)]：\n"
@@ -1001,7 +1078,8 @@ class DysonDynamicSimulator:
             f"  • 電網供電滿足率 η = {s['grid_satisfaction']*100:.1f}% | 蓄電器儲能 = {_fn(s['battery_charge_mwh'])} / {_fn(s['battery_capacity_mwh'])} MWh\n"
             f"  • 🌌 宇宙紀元時間尺度：累計 {_fn(s.get('cosmic_years', 0.0), 0)} 地球年 (當前時間流速: 1 Tick = {_fn(s.get('years_per_tick', 1.0), 0)} 地球年)\n"
             f"{consumer_line}"
-            f"  • 發電結構：太陽能/風力={_fn(s['gen_solar_wind_mw'])} MW, 火力={_fn(s['gen_thermal_mw'])} MW, 重氫聚變={_fn(s['gen_fusion_mw'])} MW, 戴森接收站={_fn(s['gen_dyson_receiver_mw'])} MW, 反物質太陽={_fn(s['gen_antimatter_mw'])} MW\n"
+            f"  • 發電結構：🌋地熱能={_fn(s.get('gen_geothermal_mw', 0.0))} MW ({_fn(s.get('geothermal_plants', 4.0))}座), 🌊深海洋流={_fn(s.get('gen_ocean_current_mw', 0.0))} MW ({_fn(s.get('ocean_current_turbines', 6.0))}組), 火力={_fn(s['gen_thermal_mw'])} MW, 重氫聚變={_fn(s['gen_fusion_mw'])} MW, 戴森接收站={_fn(s['gen_dyson_receiver_mw'])} MW, 反物質太陽={_fn(s['gen_antimatter_mw'])} MW, ⚠️空轉逆火負發電=-{_fn(s.get('parasitic_drain_mw', 0.0))} MW\n"
+            f"  • 🏗️ 基建重心 (`build_focus`) 建議：Stage 1 推薦 `\"geothermal\"` (地熱能 2.8MW/座) 或 `\"ocean_current\"` (洋流發電 1.6MW/組) 或 `\"thermal\"` (Stage 1 尚未解鎖精煉與核融合，強開高階 throttle 會造成空轉逆火負發電！)；Stage 2 推薦 `\"refinery\"` / `\"fusion\"`；Stage 3 推薦 `\"swarm\"`；Stage 4+ 推薦 `\"shell\"`。\n"
             f"  • 化工與底層燃料鏈：燃煤庫存={_fn(s['coal_stock'])}, 氫氣儲槽(H2)={s['hydrogen_tank_pct']:.1f}%, 精煉油儲槽={s['refined_oil_tank_pct']:.1f}%, 重氫庫存={_fn(s['deuterium_stock'])}, 反物質燃料棒庫存={_fn(s.get('antimatter_rod_stock', 0.0))}\n"
             f"  • 太陽系與超維指標：軌道太陽帆={_fn(s['active_solar_sails'], 0)} 面, 戴森球結構節點={_fn(s['dyson_shell_nodes'])} (覆蓋 {_fn(s['dyson_shell_coverage_pct'])}%), EROEI={_fn(s['eroei'], 2)}, 🌀 多維非線性指數 α_dim={p.get('dimensional_exponent', 1.0):.2f} (超維能量利用率倍率={_fn(s.get('multidim_utilization_factor', 1.0), 2)}x | 自然熵損耗: {s.get('wear_rate_500t_pct', 0.1):.1f}%/500t)\n\n"
             f"🚨 [太空災難與死鎖診斷 (Active Faults & Bottlenecks)]：\n"
