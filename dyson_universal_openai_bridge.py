@@ -86,6 +86,36 @@ DEFAULT_PROFILES_DATA: Dict[str, Any] = {
             "max_tokens": 1536,
             "temperature": 0.5,
             "top_p": 0.95,
+            "max_session_calls": 60,
+            "max_session_tokens": 250000,
+            "tcp_host": "127.0.0.1",
+            "tcp_port": 18960,
+        },
+        "google_gemini_native_rest": {
+            "name": "☁️ Google AI Studio 原生 REST (v1beta/models:generateContent + 防爆)",
+            "api_base": "https://generativelanguage.googleapis.com/v1beta",
+            "api_key": "",
+            "model": "gemini-2.5-flash",
+            "engine_label": "Google-Gemini-Native-REST (Vanilla No-LoRA)",
+            "max_tokens": 1280,
+            "temperature": 0.5,
+            "top_p": 0.95,
+            "max_session_calls": 55,
+            "max_session_tokens": 250000,
+            "tcp_host": "127.0.0.1",
+            "tcp_port": 18960,
+        },
+        "google_gemini_cloud": {
+            "name": "☁️ Google Gemini Cloud API (OpenAI-Compat 防爆保護)",
+            "api_base": "https://generativelanguage.googleapis.com/v1beta/openai",
+            "api_key": "",
+            "model": "gemini-2.5-flash",
+            "engine_label": "Google-Gemini-Cloud (Vanilla No-LoRA)",
+            "max_tokens": 1280,
+            "temperature": 0.5,
+            "top_p": 0.95,
+            "max_session_calls": 55,
+            "max_session_tokens": 250000,
             "tcp_host": "127.0.0.1",
             "tcp_port": 18960,
         },
@@ -98,6 +128,8 @@ DEFAULT_PROFILES_DATA: Dict[str, Any] = {
             "max_tokens": 1536,
             "temperature": 0.5,
             "top_p": 0.95,
+            "max_session_calls": 60,
+            "max_session_tokens": 250000,
             "tcp_host": "127.0.0.1",
             "tcp_port": 18960,
         },
@@ -135,7 +167,7 @@ def _build_headers(api_key: str, stream: bool = False) -> Dict[str, str]:
     headers = {
         "Content-Type": "application/json",
         "Accept": "text/event-stream" if stream else "application/json",
-        "User-Agent": "DysonUniversalOpenAIBridge/2.0",
+        "User-Agent": "DysonUniversalOpenAIBridge/2.1",
     }
     clean_key = (api_key or "").strip()
     if clean_key:
@@ -143,11 +175,26 @@ def _build_headers(api_key: str, stream: bool = False) -> Dict[str, str]:
             clean_key = clean_key[7:].strip()
         headers["Authorization"] = f"Bearer {clean_key}"
         headers["api-key"] = clean_key  # Delta APIM / Azure OpenAI compatibility
+        headers["x-goog-api-key"] = clean_key  # Google AI Studio Native REST compatibility
     return headers
+
+
+def is_google_native_rest(api_base: str) -> bool:
+    b = (api_base or "").strip().lower()
+    return "generativelanguage.googleapis.com" in b and "/openai" not in b
 
 
 def normalize_api_base(api_base: str) -> str:
     b = (api_base or "").strip().rstrip("/")
+    if is_google_native_rest(b):
+        # Strip trailing :generateContent or /models/... if user pasted full URL from AI Studio docs
+        if "/models/" in b:
+            b = b.split("/models/")[0]
+        if b.endswith("/models"):
+            b = b[: -len("/models")]
+        if not b.endswith("/v1beta") and not b.endswith("/v1"):
+            b = b + "/v1beta"
+        return b
     if b.endswith("/chat/completions"):
         b = b[: -len("/chat/completions")]
     if b.endswith("/models"):
@@ -165,7 +212,7 @@ def auto_detect_openai_model(
 ) -> Tuple[str, List[str]]:
     """
     Queries `GET {api_base}/models` to discover available models on the endpoint.
-    If `preferred_model` is 'auto' or empty, automatically selects the best chat/LLM model.
+    Supports both OpenAI-compatible `/v1/models` and Google AI Studio Native `/v1beta/models`.
     """
     norm_base = normalize_api_base(api_base)
     models_url = f"{norm_base}/models"
@@ -176,13 +223,30 @@ def auto_detect_openai_model(
         req = urllib.request.Request(models_url, headers=_build_headers(api_key, stream=False), method="GET")
         with urllib.request.urlopen(req, timeout=10.0, context=ctx) as resp:
             raw = json.loads(resp.read().decode("utf-8", errors="ignore"))
-            data_list = raw.get("data") if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
-            if isinstance(data_list, list):
-                for item in data_list:
-                    if isinstance(item, dict) and item.get("id"):
-                        discovered.append(str(item["id"]))
-                    elif isinstance(item, str):
-                        discovered.append(item)
+            if isinstance(raw, dict) and "models" in raw and isinstance(raw["models"], list):
+                # Google AI Studio Native `/v1beta/models` response format
+                for item in raw["models"]:
+                    if not isinstance(item, dict):
+                        continue
+                    methods = item.get("supportedGenerationMethods") or []
+                    if methods and "generateContent" not in methods:
+                        continue
+                    name = str(item.get("name", ""))
+                    if name.startswith("models/"):
+                        name = name[len("models/") :]
+                    if name:
+                        discovered.append(name)
+            else:
+                data_list = raw.get("data") if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
+                if isinstance(data_list, list):
+                    for item in data_list:
+                        if isinstance(item, dict) and item.get("id"):
+                            mid = str(item["id"])
+                            if mid.startswith("models/"):
+                                mid = mid[len("models/") :]
+                            discovered.append(mid)
+                        elif isinstance(item, str):
+                            discovered.append(item)
     except Exception:
         pass
 
@@ -248,8 +312,100 @@ def stream_openai_chat_turn(
     Automatically falls back to non-streaming if SSE fails.
     """
     norm_base = normalize_api_base(api_base)
-    url = f"{norm_base}/chat/completions"
     ctx = _build_ssl_context(insecure_ssl)
+
+    # --- Branch A: Google AI Studio Native REST API (`:streamGenerateContent?alt=sse` / `:generateContent`) ---
+    if is_google_native_rest(norm_base):
+        clean_model = (model_id or "gemini-2.5-flash").strip()
+        if clean_model.startswith("models/"):
+            clean_model = clean_model[len("models/") :]
+        if not clean_model or clean_model in ("auto", "default", "unknown-openai-model"):
+            clean_model = "gemini-2.5-flash"
+
+        contents: List[Dict[str, Any]] = []
+        if conversation_history:
+            for m in conversation_history:
+                r = "model" if m.get("role") == "assistant" else "user"
+                contents.append({"role": r, "parts": [{"text": str(m.get("content", ""))}]})
+        contents.append({"role": "user", "parts": [{"text": user_prompt}]})
+
+        g_payload: Dict[str, Any] = {
+            "system_instruction": {"parts": [{"text": system_inst}]},
+            "contents": contents,
+            "generationConfig": {
+                "temperature": temperature,
+                "topP": top_p,
+                "maxOutputTokens": max(max_tokens, 1536),
+                "thinkingConfig": {"thinkingBudget": 256},
+            },
+        }
+
+        accumulated_text = ""
+        completion_tokens = 0
+        chunk_steps = 0
+        stream_url = f"{norm_base}/models/{clean_model}:streamGenerateContent?alt=sse"
+        sync_url = f"{norm_base}/models/{clean_model}:generateContent"
+
+        try:
+            req = urllib.request.Request(
+                stream_url,
+                data=json.dumps(g_payload).encode("utf-8"),
+                headers=_build_headers(api_key, stream=True),
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=180.0, context=ctx) as resp:
+                for raw_line in resp:
+                    line = raw_line.decode("utf-8", errors="ignore").strip()
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data_str = line[5:].strip()
+                    if not data_str or data_str == "[DONE]":
+                        continue
+                    try:
+                        chunk = json.loads(data_str)
+                    except Exception:
+                        continue
+                    usage_meta = chunk.get("usageMetadata") or {}
+                    if usage_meta.get("candidatesTokenCount"):
+                        completion_tokens = max(completion_tokens, int(usage_meta["candidatesTokenCount"]))
+                    cands = chunk.get("candidates") or []
+                    if cands:
+                        parts = (cands[0].get("content") or {}).get("parts") or []
+                        for p in parts:
+                            piece = p.get("text")
+                            if piece:
+                                accumulated_text += str(piece)
+                                chunk_steps += 1
+                                on_token_callback(str(piece))
+        except Exception:
+            req_fb = urllib.request.Request(
+                sync_url,
+                data=json.dumps(g_payload).encode("utf-8"),
+                headers=_build_headers(api_key, stream=False),
+                method="POST",
+            )
+            with urllib.request.urlopen(req_fb, timeout=180.0, context=ctx) as resp_fb:
+                body = json.loads(resp_fb.read().decode("utf-8", errors="ignore"))
+                usage_meta = body.get("usageMetadata") or {}
+                cands = body.get("candidates") or []
+                if cands:
+                    parts = (cands[0].get("content") or {}).get("parts") or []
+                    for p in parts:
+                        piece = p.get("text")
+                        if piece:
+                            accumulated_text += str(piece)
+                            on_token_callback(str(piece))
+                completion_tokens = int(
+                    usage_meta.get("candidatesTokenCount") or max(1, len(accumulated_text) // 3)
+                )
+
+        if "<dyson_action>" in accumulated_text and "</dyson_action>" not in accumulated_text:
+            accumulated_text += "\n</dyson_action>"
+            on_token_callback("\n</dyson_action>")
+        return accumulated_text, max(completion_tokens, chunk_steps, 1), clean_model
+
+    # --- Branch B: Standard OpenAI-Compatible `/chat/completions` ---
+    url = f"{norm_base}/chat/completions"
 
     messages: List[Dict[str, str]] = [{"role": "system", "content": system_inst}]
     if conversation_history:
@@ -369,6 +525,8 @@ class UniversalOpenAIBridgeWorker:
         max_tokens: int,
         temp: float,
         top_p: float,
+        max_session_calls: int = 60,
+        max_session_tokens: int = 250000,
         ui_event_queue: Optional["queue.Queue[Dict[str, Any]]"] = None,
     ) -> None:
         self.tcp_host = tcp_host
@@ -380,6 +538,8 @@ class UniversalOpenAIBridgeWorker:
         self.max_tokens = int(max_tokens)
         self.temp = float(temp)
         self.top_p = float(top_p)
+        self.max_session_calls = max(1, int(max_session_calls))
+        self.max_session_tokens = max(1000, int(max_session_tokens))
         self.ui_queue = ui_event_queue
 
         self.detected_model = model_arg if (model_arg and model_arg != "auto") else "auto-detecting..."
@@ -388,6 +548,8 @@ class UniversalOpenAIBridgeWorker:
         self.client: Optional[DysonTcpSyncClient] = None
         self.thread: Optional[threading.Thread] = None
         self.history: List[Dict[str, str]] = []
+        self.session_calls_used = 0
+        self.session_tokens_used = 0
 
     def _emit_ui(self, evt_type: str, **kwargs: Any) -> None:
         if self.ui_queue is not None:
@@ -517,17 +679,37 @@ class UniversalOpenAIBridgeWorker:
                         })
 
                 try:
+                    if self.session_calls_used >= self.max_session_calls or self.session_tokens_used >= self.max_session_tokens:
+                        warn_msg = (
+                            f"\n🛑 [防爆保險絲觸發 Circuit Breaker] 已達單場安全上限 "
+                            f"(Calls: {self.session_calls_used}/{self.max_session_calls}, "
+                            f"Tokens: {self.session_tokens_used:,}/{self.max_session_tokens:,})！自動跳過雲端呼叫以保護帳單！\n"
+                        )
+                        self._emit_ui("log", text=warn_msg)
+                        if self.client is not None:
+                            self.client.send_packet({
+                                "type": "ai_action_complete",
+                                "tick": tick,
+                                "raw_text": '<dyson_action>{"next_wake_ticks": 500}</dyson_action>',
+                                "model_id": self.detected_model,
+                                "engine_mode": self.engine_label,
+                                "api_base": self.api_base,
+                            })
+                        continue
+
                     is_genesis_turn = "new_stage_genesis" in prompt
                     if is_genesis_turn:
-                        turn_max_toks = max(self.max_tokens, 1024)
+                        turn_max_toks = max(self.max_tokens, 1536)
                         ctx_hist = self.history[-2:]
                     elif is_compact:
-                        turn_max_toks = min(self.max_tokens, 640)
+                        # Avoid clamping to 640 so Thinking models (e.g. Gemini 3.7 Flash) don't truncate <dyson_action>
+                        turn_max_toks = max(self.max_tokens, 1280)
                         ctx_hist = self.history[-2:]
                     else:
-                        turn_max_toks = max(self.max_tokens, 1024)
+                        turn_max_toks = max(self.max_tokens, 1536)
                         ctx_hist = self.history[-4:]
 
+                    est_in_toks = max(1, (len(system_inst) + len(prompt) + sum(len(m.get("content", "")) for m in ctx_hist)) // 3)
                     full_reply, total_toks, actual_resp_model = stream_openai_chat_turn(
                         api_base=self.api_base,
                         api_key=self.api_key,
@@ -543,6 +725,8 @@ class UniversalOpenAIBridgeWorker:
                     if actual_resp_model and actual_resp_model not in ("default", "unknown-openai-model"):
                         self.detected_model = actual_resp_model
 
+                    self.session_calls_used += 1
+                    self.session_tokens_used += (est_in_toks + total_toks)
                     elapsed = max(0.001, time.time() - t0)
                     tps = total_toks / elapsed
                     short_user = f"[Tick #{tick} Telemetry]" if is_compact else prompt
@@ -564,13 +748,18 @@ class UniversalOpenAIBridgeWorker:
                         "turn_done",
                         tick=tick,
                         tokens=total_toks,
+                        session_calls=self.session_calls_used,
+                        session_tokens=self.session_tokens_used,
                         elapsed=elapsed,
                         tps=tps,
                         model=self.detected_model,
                     )
                     self._emit_ui(
                         "log",
-                        text=f"\n✅ [Tick #{tick} Done | {self.detected_model}] {total_toks} toks in {elapsed:.2f}s ({tps:.1f} tok/s) -> 已回傳模擬器！\n",
+                        text=(
+                            f"\n✅ [Tick #{tick} Done | {self.detected_model}] Out:{total_toks} toks ({tps:.1f} tok/s) | "
+                            f"累計: {self.session_calls_used}/{self.max_session_calls} 輪, ~{self.session_tokens_used:,}/{self.max_session_tokens:,} toks -> 已回傳模擬器！\n"
+                        ),
                     )
                 except Exception as e:
                     self._emit_ui("log", text=f"\n❌ [Tick #{tick} API Error]: {e}\n")
@@ -717,15 +906,30 @@ def launch_universal_bridge_gui() -> None:
             self.spn_top_p.setValue(0.95)
             row_params.addWidget(self.spn_top_p)
 
+            row_params.addWidget(QLabel("🛡️最大輪數:"))
+            self.spn_max_calls = QSpinBox()
+            self.spn_max_calls.setRange(5, 500)
+            self.spn_max_calls.setValue(55)
+            self.spn_max_calls.setToolTip("單場防爆上限：超過此呼叫次數自動熔斷停止呼叫雲端 API")
+            row_params.addWidget(self.spn_max_calls)
+
+            row_params.addWidget(QLabel("🛡️Token上限(K):"))
+            self.spn_max_budget_k = QSpinBox()
+            self.spn_max_budget_k.setRange(10, 5000)
+            self.spn_max_budget_k.setSingleStep(50)
+            self.spn_max_budget_k.setValue(250)
+            self.spn_max_budget_k.setToolTip("單場總 Token 預算上限 (單位: K Tokens)")
+            row_params.addWidget(self.spn_max_budget_k)
+
             row_params.addWidget(QLabel("Simulator TCP:"))
             self.edt_tcp_host = QLineEdit("127.0.0.1")
-            self.edt_tcp_host.setFixedWidth(110)
+            self.edt_tcp_host.setFixedWidth(95)
             row_params.addWidget(self.edt_tcp_host)
             self.spn_tcp_port = QSpinBox()
             self.spn_tcp_port.setRange(1024, 65535)
             self.spn_tcp_port.setValue(DEFAULT_TCP_PORT)
             row_params.addWidget(self.spn_tcp_port)
-            prof_form.addRow("推論與模擬器參數:", row_params)
+            prof_form.addRow("推論與防爆參數:", row_params)
 
             root_v.addWidget(prof_box)
 
@@ -808,6 +1012,8 @@ def launch_universal_bridge_gui() -> None:
             self.spn_max_tokens.setValue(int(p.get("max_tokens", 1536)))
             self.spn_temp.setValue(float(p.get("temperature", 0.5)))
             self.spn_top_p.setValue(float(p.get("top_p", 0.95)))
+            self.spn_max_calls.setValue(int(p.get("max_session_calls", 55)))
+            self.spn_max_budget_k.setValue(max(10, int(p.get("max_session_tokens", 250000)) // 1000))
             self.edt_tcp_host.setText(str(p.get("tcp_host", "127.0.0.1")))
             self.spn_tcp_port.setValue(int(p.get("tcp_port", DEFAULT_TCP_PORT)))
 
@@ -832,6 +1038,8 @@ def launch_universal_bridge_gui() -> None:
                 "max_tokens": int(self.spn_max_tokens.value()),
                 "temperature": float(self.spn_temp.value()),
                 "top_p": float(self.spn_top_p.value()),
+                "max_session_calls": int(self.spn_max_calls.value()),
+                "max_session_tokens": int(self.spn_max_budget_k.value()) * 1000,
                 "tcp_host": self.edt_tcp_host.text().strip() or "127.0.0.1",
                 "tcp_port": int(self.spn_tcp_port.value()),
             }
@@ -925,6 +1133,8 @@ def launch_universal_bridge_gui() -> None:
                 max_tokens=int(self.spn_max_tokens.value()),
                 temp=float(self.spn_temp.value()),
                 top_p=float(self.spn_top_p.value()),
+                max_session_calls=int(self.spn_max_calls.value()),
+                max_session_tokens=int(self.spn_max_budget_k.value()) * 1000,
                 ui_event_queue=self.ui_queue,
             )
             self.worker.start()
@@ -984,11 +1194,13 @@ def launch_universal_bridge_gui() -> None:
                         self.cmb_model.setCurrentText(sel)
                     self.cmb_model.blockSignals(False)
                 elif etype == "turn_done":
-                    self.total_turns += 1
+                    self.total_turns = int(evt.get("session_calls", self.total_turns + 1))
+                    tot_toks = int(evt.get("session_tokens", 0))
                     mdl = evt.get("model", "")
                     tps = float(evt.get("tps", 0.0))
                     self.lbl_model_tag.setText(
-                        f"🤖 當前推論模型: {mdl} [{self.edt_engine_label.text().strip()}] | 累計推論: {self.total_turns} 輪 (上次 {tps:.1f} tok/s)"
+                        f"🤖 模型: {mdl} [{self.edt_engine_label.text().strip()}] | "
+                        f"🛡️ 累計: {self.total_turns}/{self.spn_max_calls.value()} 輪 (~{tot_toks:,} toks, {tps:.1f} tok/s)"
                     )
 
     app = QApplication(sys.argv)

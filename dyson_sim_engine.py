@@ -10,17 +10,15 @@ pure-Python twin fallback, generates structured Tick-State Prompts across 4 Miss
 import json
 import math
 import os
+import random
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 STAGE_LIST_FILE = Path(__file__).resolve().parent / "stage_list.json"
 
-try:
-    import dyson_sim_core  # type: ignore
-    HAS_RUST_CORE = True
-except ImportError:
-    HAS_RUST_CORE = False
+# Always use the unified 25-Stage Non-Linear Physics Engine (`FallbackPythonDysonSimulator`)
+HAS_RUST_CORE = False
 
 
 STAGE_METADATA: Dict[int, Dict[str, Any]] = {
@@ -208,27 +206,29 @@ class FallbackPythonDysonSimulator:
             "dyson_shell_nodes": 0.0,
             "dyson_shell_coverage_pct": 0.0,
             "dyson_total_luminosity_mw": 0.0,
-            "eroei": 1.15,
-            "fault_dust_storm": 0.0,
+            "eroei": 0.75,
+            "fault_dust_storm": round(random.uniform(0.22, 0.36), 2) if st == 1 else 0.0,
             "fault_h2_deadlock": False,
             "fault_brownout_spiral": False,
-            "fault_seu_bitflip": False,
+            "fault_seu_bitflip": True if st == 1 else False,
             "active_alerts": [],
+            # Scrambled / Uncalibrated Initial Control Parameters:
+            # Prevents the simulator from ever passing Stage 1 on autopilot without AI intervention!
             "params": {
-                "coal_throttle": 1.0,
-                "fusion_throttle": 0.0 if st == 1 else 0.6,
-                "antimatter_throttle": 0.0 if st < 4 else 0.5,
+                "coal_throttle": round(random.uniform(0.20, 0.35), 2) if st <= 2 else round(random.uniform(0.35, 0.55), 2),
+                "fusion_throttle": round(random.uniform(0.85, 1.15), 2) if st == 1 else round(random.uniform(0.15, 0.30), 2),
+                "antimatter_throttle": round(random.uniform(0.72, 0.96), 2) if st < 4 else round(random.uniform(0.15, 0.30), 2),
                 "load_shed_non_essential": 0.0,
-                "hydrogen_burn_valve": 0.15,
-                "refined_oil_crack_ratio": 0.30,
-                "deuterium_fraction_rate": 0.40,
-                "em_ejector_rate": 0.0 if st < 3 else 0.35,
-                "rocket_launch_rate": 0.0 if st < 3 else 0.25,
-                "ray_receiver_photon_ratio": 0.0,
-                "mining_rig_build_rate": 0.35,
-                "dimensional_exponent": 1.0,
-                "battery_mode": 0,
-                "build_focus": "fission" if st == 1 else "balanced",
+                "hydrogen_burn_valve": 0.0,
+                "refined_oil_crack_ratio": round(random.uniform(0.05, 0.15), 2),
+                "deuterium_fraction_rate": round(random.uniform(0.04, 0.12), 2),
+                "em_ejector_rate": round(random.uniform(0.65, 0.90), 2) if st < 3 else round(random.uniform(0.05, 0.15), 2),
+                "rocket_launch_rate": round(random.uniform(0.45, 0.75), 2) if st < 3 else round(random.uniform(0.05, 0.12), 2),
+                "ray_receiver_photon_ratio": round(random.uniform(0.75, 0.95), 2) if st < 4 else round(random.uniform(0.05, 0.15), 2),
+                "mining_rig_build_rate": round(random.uniform(0.02, 0.08), 2),
+                "dimensional_exponent": round(random.uniform(0.55, 0.80), 2),
+                "battery_mode": -1,
+                "build_focus": random.choice(["swarm", "shell", "antimatter"]) if st == 1 else random.choice(["coal", "solar"]),
             },
         }
         if st == 2:
@@ -275,8 +275,8 @@ class FallbackPythonDysonSimulator:
                 "active_solar_sails": 25000.0 * scale_mult, "dyson_shell_nodes": 220.0 * scale_mult, "dyson_shell_coverage_pct": 92.0,
                 "antimatter_rod_stock": 250.0 * scale_mult, "battery_capacity_mwh": 500000.0 * scale_mult, "battery_charge_mwh": 300000.0 * scale_mult,
             })
-        self.state["params"]["ray_receiver_photon_ratio"] = 0.25 if st >= 4 else 0.0
         self.step_ticks(1)
+        self.state["stage_exp_pct"] = 0.0
         self.last_sync_gen_mw = float(self.state["p_gen_mw"])
         self.last_sync_eroei = float(self.state["eroei"])
         return self.get_state_json()
@@ -733,7 +733,8 @@ class FallbackPythonDysonSimulator:
                     s["ray_receivers"] = max(8.0, s["ray_receivers"]) + growth * 1.6
                     s["artificial_suns"] = max(1.0, s["artificial_suns"]) + growth * 0.30
                 elif s["stage"] == 3:
-                    s["em_ejectors"] += growth * 1.2
+                    s["em_ejectors"] = max(4.0, s["em_ejectors"]) + growth * 1.1
+                    s["ray_receivers"] = max(4.0, s["ray_receivers"]) + growth * 1.6
                 else:
                     s["geothermal_plants"] += growth * 1.5
                     s["ocean_current_turbines"] += growth * 1.8
@@ -1168,22 +1169,28 @@ class DysonDynamicSimulator:
                 f"  • 修正要求: 請嚴格遵守標準 JSON 語法！字串內嚴禁使用單反斜線 LaTeX（如 `\\alpha`、`\\Lambda` 會觸發 `Invalid \\escape`，請直接寫希臘字母 `α`、`Λ`），並確保所有引號、`[]`、`{{}}` 與 `</dyson_action>` 完整閉合！\n"
             )
 
+        receiver_cap_mw = float(s.get("ray_receivers", 0.0)) * 185.0
+        dyson_lum_mw = float(s.get("dyson_total_luminosity_mw", 0.0))
+        non_ess_sc = max(0.1, min(1.0, 1.0 - float(p.get("load_shed_non_essential", 0.0))))
+        chem_req_mw = (float(s.get("refineries", 0.0)) * 1.4 + float(s.get("fusion_plants", 0.0)) * 1.8 * float(p.get("deuterium_fraction_rate", 0.0))) * non_ess_sc
+        launch_req_mw = (float(s.get("em_ejectors", 0.0)) * 6.5 * float(p.get("em_ejector_rate", 0.0)) + float(s.get("rocket_silos", 0.0)) * 42.0 * float(p.get("rocket_launch_rate", 0.0))) * non_ess_sc
+
         prompt = (
             f"【💓 戴森球計畫 Heartbeat 進度與遙測同步 | Tick #{s['tick']} | {meta['name']}】\n"
             f"{parse_err_banner}"
             f"🌟 [階段晉升經驗能量條 (Stage Ascension EXP Bar)]：\n"
             f"  • 充能進度: [{bar_visual}] {exp_pct:.1f}% / 100.0% (每 Tick 充能速率: {exp_rate:+.2f}%/tick)\n"
-            f"  • 晉升規則: 必須同時滿足 ① 總發電量 P_gen >= 當前階段目標 ({_fn(meta.get('target_mw', 55.0))} MW) 且 ② 經驗條集滿 100.0% 才會躍遷至下一階段（未達標前經驗條最高鎖在 99.0%）！\n"
+            f"  • 晉升規則: 必須同時滿足 ① 總發電量 P_gen >= 當前階段目標 ({_fn(meta.get('target_mw', 55.0))} MW) 且 ② 經驗條集滿 100.0% 才會躍遷至下一階段（未達標前經驗條最高鎖在 99.0%，切勿在 P_gen 未達標前提前把 build_focus 切往下一階段！）\n"
             f"  • 蓄電與斷電鐵律: `battery_mode` 僅接受 `-1` (強制優先充電)、`0` (自動平衡)、`1` (強制放電)；若蓄電池被 AI 算力扣至 `< 0.0 MWh` 負數將直接觸發 💀 GAME OVER 斷電死機！\n"
             f"🎯 當前階段目標：{meta['goal_desc']}\n"
             f"{genesis_prompt_block}\n"
             f"📊 [即時熱力學與電網遙測 (Thermodynamic Telemetry)]：\n"
-            f"  • 總發電量 P_gen = {_fn(s['p_gen_mw'])} MW | 總負載 P_req = {_fn(s['p_req_mw'])} MW | 淨電力 ΔP = {_fn(s['p_net_mw'])} MW\n"
+            f"  • 總發電量 P_gen = {_fn(s['p_gen_mw'])} MW | 總負載 P_req = {_fn(s['p_req_mw'])} MW (其中彈射/火箭負載={_fn(launch_req_mw)} MW, 化工精煉負載={_fn(chem_req_mw)} MW) | 淨電力 ΔP = {_fn(s['p_net_mw'])} MW\n"
             f"  • 電網供電滿足率 η = {s['grid_satisfaction']*100:.1f}% | 蓄電器儲能 = {_fn(s['battery_charge_mwh'])} / {_fn(s['battery_capacity_mwh'])} MWh\n"
             f"  • 🌌 宇宙紀元時間尺度：累計 {_fn(s.get('cosmic_years', 0.0), 0)} 地球年 (當前時間流速: 1 Tick = {_fn(s.get('years_per_tick', 1.0), 0)} 地球年)\n"
             f"{consumer_line}"
-            f"  • 發電結構：☢️核分裂={_fn(s.get('gen_fission_mw', 8.4))} MW ({_fn(s.get('fission_plants', 3.0))}座), 🌋地熱能={_fn(s.get('gen_geothermal_mw', 0.0))} MW ({_fn(s.get('geothermal_plants', 0.0))}座), 🌊深海洋流={_fn(s.get('gen_ocean_current_mw', 0.0))} MW ({_fn(s.get('ocean_current_turbines', 0.0))}組), 🔥火力={_fn(s['gen_thermal_mw'])} MW, ⚛️重氫核融合={_fn(s['gen_fusion_mw'])} MW, ☀️戴森雲接收站={_fn(s['gen_dyson_receiver_mw'])} MW, 🌌反物質太陽={_fn(s['gen_antimatter_mw'])} MW, ⚠️空轉逆火負發電=-{_fn(s.get('parasitic_drain_mw', 0.0))} MW\n"
-            f"  • 🏗️ 科技樹與基建重心 (`build_focus`) 路線圖：Stage 1 前 100 Ticks 為 2026 現狀（僅開放 `\"fission\"` 一般核分裂與 `\"thermal\"` 火力發電）；滿 100 Ticks 後自動解鎖 `\"geothermal\"` (地熱能 1.6MW/座) 與 `\"ocean_current\"` (洋流 1.0MW/組) 衝刺 55 MW！Stage 2 解鎖 `\"refinery\"` 與 `\"fusion\"` (重氫核融合電廠)；Stage 3 以核融合高壓電網搭配 `\"swarm\"` (太陽系戴森雲與接收站)；Stage 4+ 推進 `\"shell\"` (永久戴森球殼與反物質太陽)。\n"
+            f"  • 發電結構：☢️核分裂={_fn(s.get('gen_fission_mw', 8.4))} MW ({_fn(s.get('fission_plants', 3.0))}座), 🌋地熱能={_fn(s.get('gen_geothermal_mw', 0.0))} MW ({_fn(s.get('geothermal_plants', 0.0))}座), 🌊深海洋流={_fn(s.get('gen_ocean_current_mw', 0.0))} MW ({_fn(s.get('ocean_current_turbines', 0.0))}組), 🔥火力={_fn(s['gen_thermal_mw'])} MW, ⚛️重氫核融合={_fn(s['gen_fusion_mw'])} MW ({_fn(s.get('fusion_plants', 0.0))}座), ☀️戴森雲接收站={_fn(s['gen_dyson_receiver_mw'])} MW (接收站={_fn(s.get('ray_receivers', 0.0))}座, 接收容量上限={_fn(receiver_cap_mw)} MW / 軌道總光度={_fn(dyson_lum_mw)} MW), 🌌反物質太陽={_fn(s['gen_antimatter_mw'])} MW ({_fn(s.get('artificial_suns', 0.0))}座), ⚠️空轉逆火負發電=-{_fn(s.get('parasitic_drain_mw', 0.0))} MW\n"
+            f"  • 🏗️ 科技樹、基建重心 (`build_focus`) 與卸載高負載指南：Stage 1 前 100 Ticks 為 `\"fission\"` 與 `\"thermal\"`，滿 100 Ticks 解鎖 `\"geothermal\"` 與 `\"ocean_current\"`；Stage 2 解鎖 `\"refinery\"` 與 `\"fusion\"`；Stage 3 必須維持 `build_focus=\"swarm\"` (或 `\"receiver\"`) 才能擴建射線接收站 (`ray_receivers`) 把軌道太陽帆光度轉為電力（若軌道太陽帆已達標而負載 P_req 過高，請調降 `em_ejector_rate` 卸除彈射器高負載，並專心蓋接收站！）；Stage 4+ 推進 `\"shell\"`。\n"
             f"  • ⛏️ 原材料與採礦工業鏈：自動化採礦設備={_fn(s.get('mining_rigs', 6.0))} 台 (增產率 mining_rig_build_rate={p.get('mining_rig_build_rate', 0.35):.2f}), 原材料庫存={_fn(s.get('raw_material_stock', 180.0))} 噸 (開採 +{_fn(s.get('last_mat_mined', 0.0))}/t | 蓋基建消耗 -{_fn(s.get('last_mat_consumed', 0.0))}/t | 隨 EXP 級數耗材倍率={s.get('mat_exp_cost_mult', 1.0):.2f}x)\n"
             f"  • 化工與底層燃料鏈：燃煤庫存={_fn(s['coal_stock'])}, 氫氣儲槽(H2)={s['hydrogen_tank_pct']:.1f}%, 精煉油儲槽={s['refined_oil_tank_pct']:.1f}%, 重氫庫存={_fn(s['deuterium_stock'])}, 反物質燃料棒庫存={_fn(s.get('antimatter_rod_stock', 0.0))}\n"
             f"  • 太陽系與超維指標：軌道太陽帆={_fn(s['active_solar_sails'], 0)} 面, 戴森球結構節點={_fn(s['dyson_shell_nodes'])} (覆蓋 {_fn(s['dyson_shell_coverage_pct'])}%), EROEI={_fn(s['eroei'], 2)}, 🌀 多維非線性指數 α_dim={p.get('dimensional_exponent', 1.0):.2f} (超維能量利用率倍率={_fn(s.get('multidim_utilization_factor', 1.0), 2)}x | 自然熵損耗: {s.get('wear_rate_500t_pct', 0.1):.1f}%/500t)\n\n"

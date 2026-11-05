@@ -97,6 +97,7 @@ class DysonSphereSimWindow(QMainWindow):
 
         self.sim_running: bool = True
         self.paused_waiting_ai: bool = False
+        self.awaiting_initial_ai_action: bool = True
         self.sync_interval_ticks: int = 100
         self.ticks_since_last_sync: int = 0
         self.scheduled_action_queue: list = []
@@ -479,6 +480,7 @@ class DysonSphereSimWindow(QMainWindow):
         if hasattr(self.sim._core, "state") and isinstance(self.sim._core.state, dict):
             self.sim._core.state["auto_advance_stage"] = bool(self.chk_auto_stage.isChecked())
         self.ticks_since_last_sync = 0
+        self.awaiting_initial_ai_action = True
         # Unless user explicitly locked onto Lorenz Attractor (`lorenz_3d`), sync 3D view with Stage!
         if str(self.cmb_camera.currentData() or "") != "lorenz_3d":
             self.viewport.sync_view_to_stage(st_id)
@@ -629,6 +631,7 @@ class DysonSphereSimWindow(QMainWindow):
         self.sim.reset_stage(1)
         self.scheduled_action_queue.clear()
         self.ticks_since_last_sync = 0
+        self.awaiting_initial_ai_action = True
         self.sync_interval_ticks = 100
         self.spn_sync_ticks.blockSignals(True)
         self.spn_sync_ticks.setValue(100)
@@ -683,6 +686,23 @@ class DysonSphereSimWindow(QMainWindow):
             self.viewport.update_sim_state(
                 self.sim.get_state(),
                 paused_for_ai=(self.paused_waiting_ai or not self.sim_running),
+            )
+            return
+
+        # HARD GATE 1: Never advance any Tick while Auto-AI Sync is enabled and Bridge is NOT connected!
+        if self.chk_auto_ai_sync.isChecked() and not self.tcp_server.is_client_connected():
+            cur_s = self.sim.get_state()
+            self.lbl_lockstep_state.setText(
+                f"🔒 [HOLDING FOR BRIDGE @ Tick #{cur_s.get('tick', 1)}] 尚未偵測到 AI Bridge 連線，禁止推進 Tick！(請啟動 run_moe_bridge.sh)"
+            )
+            self.viewport.update_sim_state(cur_s, paused_for_ai=True)
+            return
+
+        # HARD GATE 2: Once Bridge connects, force initial AI calibration before advancing from Tick #1 / stage reset!
+        if self.chk_auto_ai_sync.isChecked() and self.tcp_server.is_client_connected() and getattr(self, "awaiting_initial_ai_action", False):
+            self.awaiting_initial_ai_action = False
+            self._trigger_ai_lockstep_sync(
+                reason="🚀 模擬器啟動 / 初始條件打亂狀態解鎖 (請立即修正失調節流閥與逆火負發電，否則禁止推進 Tick)"
             )
             return
 
@@ -886,13 +906,15 @@ class DysonSphereSimWindow(QMainWindow):
                 self._append_session_md(f"\n> {hello_msg.strip()}\n\n")
                 # If simulator just started / restarted (tick <= 15) and isn't already waiting for AI, trigger immediate initial check!
                 cur_t = int(self.sim.get_state().get("tick", 0))
-                if cur_t <= 15 and self.chk_auto_ai_sync.isChecked() and not self.paused_waiting_ai:
+                if (cur_t <= 15 or getattr(self, "awaiting_initial_ai_action", False)) and self.chk_auto_ai_sync.isChecked() and not self.paused_waiting_ai:
+                    self.awaiting_initial_ai_action = False
                     self._trigger_ai_lockstep_sync(
-                        reason="🚀 模擬器啟動 / 橋接器連線初始現狀確認 (檢視 2026 核分裂+火力基建初始狀態)"
+                        reason="🚀 模擬器啟動 / 橋接器連線初始現狀確認 (檢視打亂之初始失調狀態並立即校正)"
                     )
             elif etype == "client_disconnected":
-                self.lbl_tcp_status.setText("🟡 AI 推論橋接器已斷線，等待重連...")
+                self.lbl_tcp_status.setText("🟡 AI 推論橋接器已斷線，等待重連 (Tick 已鎖定暫停)...")
                 self.paused_waiting_ai = False
+                self.awaiting_initial_ai_action = True
             elif etype == "ai_token_stream":
                 piece = evt.get("piece", "")
                 if piece:
